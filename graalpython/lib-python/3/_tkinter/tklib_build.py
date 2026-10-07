@@ -197,6 +197,18 @@ int Tcl_DeleteCommand(Tcl_Interp* interp, const char* cmdName);
 Tcl_ThreadId Tcl_GetCurrentThread();
 int Tcl_DoOneEvent(int flags);
 
+typedef enum {
+    TCL_QUEUE_TAIL, TCL_QUEUE_HEAD, TCL_QUEUE_MARK
+} Tcl_QueuePosition;
+typedef int Tcl_EventProc(struct Tcl_Event *ev, int flags);
+typedef struct Tcl_Event {
+    Tcl_EventProc *proc;
+    struct Tcl_Event *nextPtr;
+} Tcl_Event;
+char *Tcl_Alloc(unsigned int numBytes);
+void Tcl_ThreadQueueEvent(Tcl_ThreadId threadId, struct Tcl_Event *ev, Tcl_QueuePosition position);
+void Tcl_ThreadAlert(Tcl_ThreadId threadId);
+
 int Tk_GetNumMainWindows();
 void Tcl_FindExecutable(char *argv0);
 """)

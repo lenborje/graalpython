@@ -139,7 +139,8 @@ def AsObj(value):
     if isinstance(value, str):
         # TCL uses UTF-16 internally (https://www.tcl.tk/man/tcl8.4/TclCmd/encoding.html)
         # But this function takes UTF-8 (https://linux.die.net/man/3/tcl_newstringobj#:~:text=array%20of%20UTF%2D8%2Dencoded%20bytes)
-        return tklib.Tcl_NewStringObj(ToTCLString(value), len(value))
+        encoded = ToTCLString(value)
+        return tklib.Tcl_NewStringObj(encoded, len(encoded))
     if isinstance(value, bool):
         return tklib.Tcl_NewBooleanObj(value)
     if isinstance(value, int):

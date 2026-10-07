@@ -98,6 +98,45 @@ class _CommandData(object):
         return
 
 
+class _CallResult(object):
+    """Outcome of a call dispatched to the interpreter/Tcl thread.
+
+    The worker thread blocks on 'done' until the interpreter thread has run
+    the call, the interpreter thread stores the result or the exception, or
+    marks the call as cancelled when the main loop stops before the queued
+    event could be processed.
+    """
+    def __init__(self):
+        self.done = threading.Event()
+        self.result = None
+        self.exc_info = None
+        self.cancelled = False
+
+
+# Pending calls marshalled to an interpreter thread, keyed by the pointer of
+# the Tcl_Event allocated for the call. Entries are (app, result, func, args,
+# kwargs); the mapping owns the call state until the event has been processed
+# or cancelled.
+_pending_thread_calls = {}
+
+
+@tkffi.callback("Tcl_EventProc")
+def _ThreadCallProc(ev, flags):
+    key = int(tkffi.cast("size_t", ev))
+    entry = _pending_thread_calls.pop(key, None)
+    if entry is None:
+        # The call was cancelled before the event was processed; just drop it.
+        return 1
+    _, result, func, args, kwargs = entry
+    try:
+        result.result = func(*args, **kwargs)
+    except BaseException:
+        result.exc_info = sys.exc_info()
+    finally:
+        result.done.set()
+    return 1
+
+
 class TkApp(object):
     _busywaitinterval = 0.02  # 20ms.
 
@@ -127,6 +166,7 @@ class TkApp(object):
 
         self._typeCache = TypeCache()
         self._commands = {}
+        self._dispatch_lock = threading.Lock()
 
         # Delete the 'exit' command, which can screw things up
         tklib.Tcl_DeleteCommand(self.interp, b"exit")
@@ -186,6 +226,44 @@ class TkApp(object):
         if self.threaded and self.thread_id != tklib.Tcl_GetCurrentThread():
             raise RuntimeError("Calling Tcl from different appartment")
 
+    def _invoke_in_tcl_thread(self, func, *args, **kwargs):
+        """Marshal func(*args, **kwargs) to the interpreter/Tcl thread.
+
+        The call is queued as a Tcl event for the interpreter thread and this
+        thread blocks until the main loop has processed the event. The return
+        value and any exception raised by the call are propagated to the
+        calling thread. Mirrors CPython's Tkapp_ThreadSend semantics.
+        """
+        result = _CallResult()
+        event = tklib.Tcl_Alloc(tkffi.sizeof("Tcl_Event"))
+        ev = tkffi.cast("Tcl_Event*", event)
+        key = int(tkffi.cast("size_t", ev))
+        with self._dispatch_lock:
+            if not self.dispatching:
+                # Without a running main loop, the queued event would never
+                # be processed.
+                tklib.Tcl_Free(event)
+                raise RuntimeError("main thread is not in main loop")
+            _pending_thread_calls[key] = (self, result, func, args, kwargs)
+            ev.proc = _ThreadCallProc
+            tklib.Tcl_ThreadQueueEvent(self.thread_id, ev, tklib.TCL_QUEUE_TAIL)
+        tklib.Tcl_ThreadAlert(self.thread_id)
+        result.done.wait()
+        if result.cancelled:
+            # The main loop stopped before the call could be processed.
+            raise RuntimeError("main thread is not in main loop")
+        if result.exc_info is not None:
+            raise result.exc_info[0](result.exc_info[1]).with_traceback(result.exc_info[2])
+        return result.result
+
+    def _cancel_pending_thread_calls(self):
+        """Wake all worker threads whose dispatched calls can not complete."""
+        with self._dispatch_lock:
+            for key in [k for k, e in _pending_thread_calls.items() if e[0] is self]:
+                _, result, _, _, _ = _pending_thread_calls.pop(key)
+                result.cancelled = True
+                result.done.set()
+
     @contextlib.contextmanager
     def _tcl_lock_released(self):
         "Context manager to temporarily release the tcl lock."
@@ -212,7 +290,7 @@ class TkApp(object):
             # The current thread is not the interpreter thread.
             # Marshal the call to the interpreter thread, then wait
             # for completion.
-            raise NotImplementedError("Call from another thread")
+            return self._invoke_in_tcl_thread(func, *args, **kwargs)
         return func(*args, **kwargs)
 
     def _getvar(self, name1, name2=None, global_only=False):
@@ -280,12 +358,13 @@ class TkApp(object):
             raise TypeError("command not callable")
 
         if self.threaded and self.thread_id != tklib.Tcl_GetCurrentThread():
-            raise NotImplementedError("Call from another thread")
+            # We cannot call Tcl directly. Instead, we must marshal the
+            # call to the interpreter thread.
+            return self._invoke_in_tcl_thread(self._do_createcommand, cmdName, func)
+        return self._do_createcommand(cmdName, func)
 
+    def _do_createcommand(self, cmdName, func):
         clientData = _CommandData(self, cmdName, func)
-
-        if self.threaded and self.thread_id != tklib.Tcl_GetCurrentThread():
-            raise NotImplementedError("Call from another thread")
 
         with self._tcl_lock:
             res = tklib.Tcl_CreateCommand(
@@ -296,16 +375,18 @@ class TkApp(object):
 
     def deletecommand(self, cmdName):
         if self.threaded and self.thread_id != tklib.Tcl_GetCurrentThread():
-            raise NotImplementedError("Call from another thread")
+            # We cannot call Tcl directly. Instead, we must marshal the
+            # call to the interpreter thread.
+            return self._invoke_in_tcl_thread(self._do_deletecommand, cmdName)
+        return self._do_deletecommand(cmdName)
 
+    def _do_deletecommand(self, cmdName):
         with self._tcl_lock:
             res = tklib.Tcl_DeleteCommand(self.interp, ToTCLString(cmdName))
         if res == -1:
             raise TclError("can't delete Tcl command")
 
     def call(self, *args):
-        flags = tklib.TCL_EVAL_DIRECT | tklib.TCL_EVAL_GLOBAL
-
         # If args is a single tuple, replace with contents of tuple
         if len(args) == 1 and isinstance(args[0], tuple):
             args = args[0]
@@ -313,7 +394,11 @@ class TkApp(object):
         if self.threaded and self.thread_id != tklib.Tcl_GetCurrentThread():
             # We cannot call the command directly. Instead, we must
             # marshal the parameters to the interpreter thread.
-            raise NotImplementedError("Call from another thread")
+            return self._invoke_in_tcl_thread(self._do_call, args)
+        return self._do_call(args)
+
+    def _do_call(self, args):
+        flags = tklib.TCL_EVAL_DIRECT | tklib.TCL_EVAL_GLOBAL
 
         # Allocate new array of object pointers.
         objects = tkffi.new("Tcl_Obj*[]", len(args))
@@ -352,6 +437,8 @@ class TkApp(object):
 
     def eval(self, script):
         self._check_tcl_appartment()
+        if isinstance(script, str):
+            script = ToTCLString(script)
         with self._tcl_lock:
             res = tklib.Tcl_Eval(self.interp, script)
             if res == tklib.TCL_ERROR:
@@ -360,6 +447,8 @@ class TkApp(object):
 
     def evalfile(self, filename):
         self._check_tcl_appartment()
+        if isinstance(filename, str):
+            filename = ToTCLString(filename)
         with self._tcl_lock:
             res = tklib.Tcl_EvalFile(self.interp, filename)
             if res == tklib.TCL_ERROR:
@@ -573,6 +662,9 @@ class TkApp(object):
                 break
         self.dispatching = False
         self.quitMainLoop = False
+        # Calls marshalled from other threads can not be processed anymore;
+        # wake their callers with an error instead of letting them hang.
+        self._cancel_pending_thread_calls()
         if self.errorInCmd:
             self.errorInCmd = False
             raise self.exc_info[0](self.exc_info[1]).with_traceback(self.exc_info[2])

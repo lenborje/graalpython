@@ -182,7 +182,7 @@ try:
 except Exception:
     setup_tkinter()
     import _tkinter
-    TclError = _tkinter.TclError
+TclError = _tkinter.TclError
 
 from tkinter.constants import *
 import re
