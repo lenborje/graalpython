@@ -19,7 +19,12 @@ patch = 'category-encoders.patch'
 license = 'BSD-3-Clause'
 
 [[cffi.rules]]
-version = '>= 1.16.0'
+version = '>= 2.1.1'
+patch = 'cffi-2.1.1.patch'
+license = 'MIT'
+
+[[cffi.rules]]
+version = '>= 1.16.0, < 2.1.1'
 patch = 'cffi-1.16.0.patch'
 license = 'MIT'
 
