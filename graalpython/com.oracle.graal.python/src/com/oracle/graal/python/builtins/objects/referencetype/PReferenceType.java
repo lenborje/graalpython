@@ -46,6 +46,7 @@ import java.lang.ref.WeakReference;
 import com.oracle.graal.python.builtins.objects.PNone;
 import com.oracle.graal.python.builtins.objects.cext.capi.transitions.CApiTransitions;
 import com.oracle.graal.python.builtins.objects.object.PythonBuiltinObject;
+import com.oracle.graal.python.runtime.PythonContext;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.object.Shape;
 
@@ -55,11 +56,11 @@ public class PReferenceType extends PythonBuiltinObject {
         private final PReferenceType ref;
         private final long pointer;
 
-        public WeakRefStorage(PReferenceType ref, Object referent, Object callback, ReferenceQueue<Object> queue) {
+        public WeakRefStorage(PReferenceType ref, Object referent, Object callback, ReferenceQueue<Object> queue, long pointer) {
             super(referent, queue);
             this.callback = callback;
             this.ref = ref;
-            this.pointer = CApiTransitions.getNativePointer(referent);
+            this.pointer = pointer;
         }
 
         public Object getCallback() {
@@ -86,7 +87,19 @@ public class PReferenceType extends PythonBuiltinObject {
     @TruffleBoundary
     public PReferenceType(Object cls, Shape instanceShape, Object pythonObject, Object callback, ReferenceQueue<Object> queue) {
         super(cls, instanceShape);
-        this.store = new WeakRefStorage(this, pythonObject, callback, queue);
+        long pointer = CApiTransitions.getNativePointer(pythonObject);
+        Object storageReferent = pythonObject;
+        if (pointer != 0) {
+            /*
+             * The referent is a native object: its lifetime is determined by its native reference
+             * count, not by the reachability of the managed wrapper. The managed wrapper may be
+             * collected while the native object is still alive because native code owns it. So the
+             * storage must not be tied to the wrapper, but to a token that is only released when
+             * the native object is actually deallocated.
+             */
+            storageReferent = CApiTransitions.getNativeWeakRefEntry(PythonContext.get(null), pointer);
+        }
+        this.store = new WeakRefStorage(this, storageReferent, callback, queue, pointer);
     }
 
     /**
@@ -120,7 +133,17 @@ public class PReferenceType extends PythonBuiltinObject {
     public Object getObject() {
         WeakRefStorage s = this.store;
         if (s != null) {
-            return s.get();
+            long pointer = s.getPointer();
+            if (pointer == 0) {
+                return s.get();
+            }
+            /*
+             * The referent is a native object. Its lifetime is tied to the native reference count,
+             * so liveness is determined by the native weakref registry: while the native object is
+             * alive, this returns its managed wrapper, re-creating the wrapper if the previous one
+             * was collected while the native object is still owned by native code.
+             */
+            return CApiTransitions.getNativeWeakRefReferent(PythonContext.get(null), pointer);
         }
         return null;
     }

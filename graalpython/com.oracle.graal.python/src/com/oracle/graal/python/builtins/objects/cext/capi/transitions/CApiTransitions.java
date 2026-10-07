@@ -215,7 +215,7 @@ public abstract class CApiTransitions {
 
         public final ArrayList<Long> referencesToBeFreed = new ArrayList<>();
         public final HashMap<Long, IdReference<?>> nativeLookup = new HashMap<>();
-        public final ConcurrentHashMap<Long, Long> nativeWeakRef = new ConcurrentHashMap<>();
+        public final ConcurrentHashMap<Long, NativeWeakRefEntry> nativeWeakRef = new ConcurrentHashMap<>();
 
         public IdReference<?>[] nativeTypeLookup;
 
@@ -690,6 +690,13 @@ public abstract class CApiTransitions {
     private static void processNativeObjectReference(NativeObjectReference reference, ArrayList<Long> referencesToBeFreed) {
         LOGGER.fine(() -> PythonUtils.formatJString("releasing %s", reference.toString()));
         if (subNativeRefCount(reference.pointer, MANAGED_REFCNT) == 0) {
+            /*
+             * The native object will be deallocated by the bulk dealloc below. Its weak
+             * references must be cleared, so remove the entry that keeps their storage alive.
+             * This is redundant if the object's tp_dealloc calls PyObject_ClearWeakRefs, but
+             * covers native objects whose dealloc does not.
+             */
+            removeNativeWeakRef(PythonContext.get(null), reference.pointer);
             referencesToBeFreed.add(reference.pointer);
         }
     }
@@ -1032,17 +1039,54 @@ public abstract class CApiTransitions {
     }
 
     /**
+     * Token object for weak references to native objects. The entry is strongly referenced by
+     * {@link HandleContext#nativeWeakRef} from the moment the first weak reference to the native
+     * object is created until the native object is actually deallocated. Weak references
+     * ({@code com.oracle.graal.python.builtins.objects.referencetype.PReferenceType}) use this
+     * entry as their {@link java.lang.ref.WeakReference} referent, so that they are cleared (and
+     * their callbacks are enqueued) when the native object dies, and not when the managed wrapper
+     * of the still-alive native object is collected.
+     */
+    public static final class NativeWeakRefEntry {
+    }
+
+    /**
      * We need to call __dealloc__ for native weakref objects before exit, as some objects might
      * need to use capi functions.
      */
     @TruffleBoundary
     public static void addNativeWeakRef(PythonContext pythonContext, PythonAbstractNativeObject object) {
-        pythonContext.handleContext.nativeWeakRef.put(getNativePointer(object), 0L);
+        getNativeWeakRefEntry(pythonContext, getNativePointer(object));
     }
 
     /**
-     * In case a weakref object is being collected. We must remove it from the list to avoid double
-     * deallocation at exit.
+     * Gets or creates the {@link NativeWeakRefEntry} for the native object at the given pointer.
+     * All weak references to the same native object share one entry.
+     */
+    @TruffleBoundary
+    public static NativeWeakRefEntry getNativeWeakRefEntry(PythonContext pythonContext, long pointer) {
+        return pythonContext.handleContext.nativeWeakRef.computeIfAbsent(pointer, p -> new NativeWeakRefEntry());
+    }
+
+    /**
+     * Resolves the referent of a weak reference to the native object at the given pointer. While
+     * the native object is alive (its {@link NativeWeakRefEntry} is still registered), this
+     * returns the managed wrapper of the native object, re-creating a wrapper if the previous one
+     * was already collected but the native object is still owned on the native side. Returns
+     * {@code null} once the native object has been deallocated.
+     */
+    @TruffleBoundary
+    public static Object getNativeWeakRefReferent(PythonContext pythonContext, long pointer) {
+        if (pythonContext.handleContext.nativeWeakRef.containsKey(pointer)) {
+            return NativeToPythonInternalNode.executeUncached(pointer, false);
+        }
+        return null;
+    }
+
+    /**
+     * In case the native object a weakref refers to is being deallocated, we must remove it from
+     * the list to avoid double deallocation at exit. This also releases the token that keeps the
+     * corresponding weak references alive, so that they are cleared and their callbacks are run.
      */
     @TruffleBoundary
     public static void removeNativeWeakRef(PythonContext pythonContext, long pointer) {

@@ -86,6 +86,104 @@ GetRefHelper = CPyExtType(
 )
 getref_helper = GetRefHelper()
 
+NativeOwner = CPyExtType(
+    'NativeOwner',
+    '''
+    static PyObject* set_item(PyObject* self, PyObject* item) {
+        NativeOwnerObject* owner = (NativeOwnerObject*)self;
+        Py_INCREF(item);
+        Py_XSETREF(owner->item, item);
+        Py_RETURN_NONE;
+    }
+    static PyObject* get_item(PyObject* self, PyObject* unused) {
+        NativeOwnerObject* owner = (NativeOwnerObject*)self;
+        if (owner->item == NULL) {
+            Py_RETURN_NONE;
+        }
+        return Py_NewRef(owner->item);
+    }
+    static void NativeOwner_dealloc(PyObject* self) {
+        PyObject_ClearWeakRefs(self);
+        Py_CLEAR(((NativeOwnerObject*)self)->item);
+        Py_TYPE(self)->tp_free(self);
+    }
+    ''',
+    cmembers='''
+    PyObject *weakreflist;
+    PyObject *item;
+    ''',
+    tp_methods='{"set_item", (PyCFunction)set_item, METH_O, ""},\n    {"get_item", (PyCFunction)get_item, METH_NOARGS, ""}',
+    tp_dealloc='NativeOwner_dealloc',
+    ready_code='NativeOwnerType.tp_weaklistoffset = offsetof(NativeOwnerObject, weakreflist);',
+)
+
+
+class TestNativeWeakRef(unittest.TestCase):
+
+    def collect_until(self, cond, rounds=10):
+        for _ in range(rounds):
+            if cond():
+                return True
+            gc.collect()
+            time.sleep(0.1)
+        return cond()
+
+    def test_weakref_to_native_object_owned_by_native_object(self):
+        owner = NativeOwner()
+        child = NativeOwner()
+        owner.set_item(child)
+        reference = weakref.ref(child)
+        del child
+        gc.collect()
+        # The managed wrapper of the child was collected, but the native owner
+        # keeps the native object alive, so the weakref must remain valid.
+        self.assertIsNotNone(reference())
+        self.assertEqual(getref_helper.getref(reference)[0], 1)
+        # Releasing the native owner actually deallocates the child, so the
+        # weakref must eventually clear.
+        del owner
+        self.assertTrue(self.collect_until(lambda: reference() is None))
+        self.assertEqual(getref_helper.getref(reference), 0)
+
+    def test_weakref_to_native_object_identity_stable(self):
+        owner = NativeOwner()
+        child = NativeOwner()
+        owner.set_item(child)
+        reference = weakref.ref(child)
+        del child
+        gc.collect()
+        # The canonical identity of the (still alive) native object must be
+        # stable even if the managed wrapper is collected and re-created in
+        # between accesses.
+        first = reference()
+        self.assertIsNotNone(first)
+        self.assertIs(owner.get_item(), first)
+        del first
+        gc.collect()
+        second = owner.get_item()
+        self.assertIs(second, reference())
+        del owner, second
+        self.assertTrue(self.collect_until(lambda: reference() is None))
+
+    def test_weakref_callback_to_native_object(self):
+        owner = NativeOwner()
+        child = NativeOwner()
+        owner.set_item(child)
+        log = []
+        reference = weakref.ref(child, log.append)
+        del child
+        gc.collect()
+        # The managed wrapper was collected, but the native object is still
+        # alive: the callback must not have been run.
+        self.assertIsNotNone(reference())
+        self.assertEqual(log, [])
+        # When the native owner releases the child, the weakref is cleared and
+        # the callback runs exactly once, with the weakref as argument.
+        del owner
+        self.assertTrue(self.collect_until(lambda: reference() is None and log))
+        self.assertEqual(log, [reference])
+
+
 class TestWeakRef(unittest.TestCase):
 
     def test_simple(self):
