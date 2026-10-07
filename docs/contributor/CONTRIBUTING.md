@@ -213,6 +213,29 @@ This will generate configurations for Eclipse, IntelliJ, and NetBeans so that yo
 See also the documentation in mx for [setting up your IDE](https://github.com/graalvm/mx/blob/master/docs/IDE.md).
 If you use another editor (such as VSCode, Emacs, or Neovim) with support for the [Eclipse language server](https://github.com/eclipse/eclipse.jdt.ls) or [Apache NetBeans language server](https://marketplace.visualstudio.com/items?itemName=ASF.apache-netbeans-java), you can also get useable development setups with that, but it's not something we explicitly support.
 
+#### `mx python-jvm` and Compiler-Enabled JVM Standalones
+
+`mx python-jvm` builds the `jvm` development configuration of the GraalPy suite.
+That configuration does not include the Truffle/Graal compiler runtime, so the
+resulting distribution executes Python code on the interpreter only. This is
+intentional: it is the fastest way to get a runnable and testable GraalPy for
+development, but guest code is not JIT-compiled and its performance is not
+representative of a GraalPy release.
+
+To build a JVM standalone distribution that includes the compiler and therefore
+JIT-compiles guest Python code, build the `GRAALPY_JVM_STANDALONE` distribution
+with the `jvm-ce` environment instead:
+
+```
+mx --env jvm-ce build --targets=GRAALPY_JVM_STANDALONE
+```
+
+This requires a Labs JDK that is new enough for the current compiler checkout;
+the JDK pin for the build is recorded in `common.json`, and `mx fetch-jdk` can
+download it. The standalone is written to
+`mxbuild/<os-arch>/GRAALPY_JVM_STANDALONE`. Building it does not require
+native-image or a full GraalVM build.
+
 The checked-in Maven POMs are lightweight facades for quick Java IDE import in editors such as Eclipse, VSCode, or any editor using JDTLS.
 They are not the full GraalPy build; use `mx ideinit` for the full generated IDE setup and `mx python-jvm` for the build needed to run or test GraalPy.
 The facade uses the `graalvm.version` Maven property for GraalVM artifact resolution; override it locally if you need a different version.
