@@ -206,3 +206,52 @@ class TestPyCapsule(CPyExtTestCase):
                     raise AssertionError("Capsule destructor didn't execute within timeout")
                 gc.collect()
                 time.sleep(0.01)
+
+    def test_capsule_repr_roundtrip(self):
+        # CPython prints the capsule's own address in repr() and some C
+        # extensions (e.g. Pillow's ImageTk) parse that address out of the
+        # string and pass it back into the C API.
+        Tester = CPyExtType(
+            "CapsuleReprRoundtripTester",
+            code="""
+            #include <string.h>
+
+            static PyObject* repr_roundtrip(PyObject* unused, PyObject* args) {
+                const char* name = "test_capsule";
+                PyObject* capsule = PyCapsule_New((void*)0x1234, name, NULL);
+                if (!capsule) {
+                    return NULL;
+                }
+                PyObject* repr = PyObject_Repr(capsule);
+                if (!repr) {
+                    Py_DECREF(capsule);
+                    return NULL;
+                }
+                const char* rs = PyUnicode_AsUTF8(repr);
+                const char* expected = "capsule object \\"test_capsule\\" at 0x";
+                const char* at = strstr(rs, expected);
+                if (!at) {
+                    Py_DECREF(repr);
+                    Py_DECREF(capsule);
+                    PyErr_SetString(PyExc_AssertionError, "no capsule address in repr");
+                    return NULL;
+                }
+                unsigned long long addr = strtoull(at + strlen(expected), NULL, 16);
+                Py_DECREF(repr);
+                if (!PyCapsule_IsValid((PyObject*)addr, name)) {
+                    Py_DECREF(capsule);
+                    PyErr_SetString(PyExc_AssertionError, "repr address does not resolve to the capsule");
+                    return NULL;
+                }
+                if (PyCapsule_GetPointer((PyObject*)addr, name) != (void*)0x1234) {
+                    Py_DECREF(capsule);
+                    PyErr_SetString(PyExc_AssertionError, "wrong pointer for repr address");
+                    return NULL;
+                }
+                Py_DECREF(capsule);
+                Py_RETURN_TRUE;
+            }
+            """,
+            tp_methods='{"repr_roundtrip", (PyCFunction)repr_roundtrip, METH_NOARGS | METH_STATIC, NULL}',
+        )
+        self.assertIs(Tester.repr_roundtrip(), True)

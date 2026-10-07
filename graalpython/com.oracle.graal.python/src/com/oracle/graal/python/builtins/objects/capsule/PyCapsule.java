@@ -140,6 +140,13 @@ public final class PyCapsule extends PythonBuiltinObject {
             quote = "";
             n = "NULL";
         }
-        return String.format("<capsule object %s%s%s at %x>", quote, n, quote, hashCode());
+        /*
+         * Like CPython, print the capsule's own address: some C extensions round-trip the address
+         * printed in the repr back into the C API (e.g. Pillow's ImageTk parses it out of the
+         * string and passes it to PyCapsule_IsValid). The address the C side can use to refer to
+         * this capsule is its native pointer, so print that instead of the Java identity hash.
+         */
+        long pointer = CApiTransitions.PythonToNativeInternalNode.executeUncached(this, false);
+        return String.format("<capsule object %s%s%s at 0x%x>", quote, n, quote, pointer);
     }
 }

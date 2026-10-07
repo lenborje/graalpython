@@ -53,7 +53,7 @@ import com.oracle.graal.python.builtins.CoreFunctions;
 import com.oracle.graal.python.builtins.PythonBuiltinClassType;
 import com.oracle.graal.python.builtins.PythonBuiltins;
 import com.oracle.graal.python.builtins.objects.capsule.PyCapsule;
-import com.oracle.graal.python.builtins.objects.cext.PythonAbstractNativeObject;
+import com.oracle.graal.python.builtins.objects.cext.capi.transitions.CApiTransitions;
 import com.oracle.graal.python.builtins.objects.type.TpSlots;
 import com.oracle.graal.python.nodes.function.PythonBuiltinBaseNode;
 import com.oracle.graal.python.nodes.function.builtins.PythonUnaryBuiltinNode;
@@ -93,7 +93,15 @@ public class CapsuleBuiltins extends PythonBuiltins {
                 builder.append('"');
                 name = builder.toString();
             }
-            return TruffleString.fromJavaStringUncached(String.format("<capsule object %s at 0x%s>", name, PythonAbstractNativeObject.systemHashCodeAsHexString(self)), TS_ENCODING);
+            /*
+             * Like CPython, print the capsule's own address: some C extensions round-trip the
+             * address printed in the repr back into the C API (e.g. Pillow's ImageTk parses it out
+             * of the string and passes it to PyCapsule_IsValid). The address the C side can use to
+             * refer to this capsule is its native pointer, so print that instead of a Java hash
+             * code.
+             */
+            long pointer = CApiTransitions.PythonToNativeInternalNode.executeUncached(self, false);
+            return TruffleString.fromJavaStringUncached(String.format("<capsule object %s at 0x%x>", name, pointer), TS_ENCODING);
         }
     }
 }
